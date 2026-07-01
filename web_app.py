@@ -1,5 +1,5 @@
 """
-web_app.py — Flask web server for the Chart Bot chatbot.
+web_app.py — Flask web server for the Chart Bot chatbot, Word Vector Explorer, and Open Knowledge Format (OKF) Bundle Manager.
 
 Run:
     python web_app.py
@@ -8,17 +8,22 @@ Then open http://localhost:5000 in your browser.
 
 import math
 import re
+import os
+import datetime
 from collections import Counter
 
 import numpy as np
-from flask import Flask, request, jsonify, render_template_string
+import yaml
+from flask import Flask, request, jsonify
+from flask_cors import CORS
 
 from stage3_load_embeddings import load_model
 from faq_data import FAQS
 
 # ── Config ────────────────────────────────────────────────────────────────────
 HIGH_CONFIDENCE = 0.70
-LOW_CONFIDENCE  = 0.45
+# Set low confidence slightly lower so users get answers for loose matches
+LOW_CONFIDENCE  = 0.40
 
 STOP_WORDS = {
     "a","an","the","is","are","was","were","be","been","being",
@@ -32,6 +37,8 @@ STOP_WORDS = {
     "he","she","they","them","their","and","but","or","so",
     "if","as","than","because","while","just","also",
 }
+
+KNOWLEDGE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'knowledge')
 
 # ── NLP helpers ───────────────────────────────────────────────────────────────
 def clean_and_tokenize(text):
@@ -90,476 +97,445 @@ def query(model, user_input, faq_index, idf, top_k=3):
 print("Loading GloVe model...")
 model = load_model()
 faq_index, idf = build_faq_index(model, FAQS)
-print("Ready!")
+print("GloVe model ready!")
 
-# ── Flask app ─────────────────────────────────────────────────────────────────
-app = Flask(__name__)
+# ── Flask app setup ───────────────────────────────────────────────────────────
+app = Flask(__name__, static_folder='dist', static_url_path='')
+CORS(app)
 
-HTML_PAGE = """<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-  <title>Chart Bot — Word Vector Explorer</title>
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
-  <style>
-    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+# Ensure knowledge directory exists
+os.makedirs(KNOWLEDGE_DIR, exist_ok=True)
 
-    :root {
-      --bg:        #0d1117;
-      --surface:   #161b22;
-      --surface2:  #21262d;
-      --border:    #30363d;
-      --accent:    #7c6ff7;
-      --accent2:   #a78bfa;
-      --green:     #3fb950;
-      --yellow:    #d29922;
-      --red:       #f85149;
-      --text:      #e6edf3;
-      --muted:     #8b949e;
-      --user-bg:   #1a3a5c;
-      --bot-bg:    #1e2a1e;
-      --radius:    14px;
-      --font:      'Inter', system-ui, sans-serif;
+# ── OKF Helpers ───────────────────────────────────────────────────────────────
+def get_okf_files(directory):
+    files_list = []
+    for root, dirs, files in os.walk(directory):
+        for f in files:
+            if f.endswith('.md'):
+                abs_path = os.path.join(root, f)
+                rel_path = os.path.relpath(abs_path, directory).replace('\\', '/')
+                files_list.append(rel_path)
+    return files_list
+
+def clean_metadata(meta):
+    if not isinstance(meta, dict):
+        return meta
+    cleaned = {}
+    for k, v in meta.items():
+        if isinstance(v, (datetime.datetime, datetime.date)):
+            cleaned[k] = v.isoformat()
+        elif isinstance(v, dict):
+            cleaned[k] = clean_metadata(v)
+        elif isinstance(v, list):
+            cleaned_list = []
+            for item in v:
+                if isinstance(item, (datetime.datetime, datetime.date)):
+                    cleaned_list.append(item.isoformat())
+                elif isinstance(item, dict):
+                    cleaned_list.append(clean_metadata(item))
+                else:
+                    cleaned_list.append(item)
+            cleaned[k] = cleaned_list
+        else:
+            cleaned[k] = v
+    return cleaned
+
+def parse_okf_file(rel_path):
+    abs_path = os.path.join(KNOWLEDGE_DIR, rel_path.replace('/', os.sep))
+    if not os.path.exists(abs_path):
+        return None
+    try:
+        with open(abs_path, 'r', encoding='utf-8') as f:
+            content = f.read()
+    except Exception as e:
+        print(f"Error reading file {abs_path}: {e}")
+        return None
+    
+    metadata = {}
+    markdown_body = content
+    if content.startswith('---'):
+        parts = content.split('---', 2)
+        if len(parts) >= 3:
+            try:
+                raw_meta = yaml.safe_load(parts[1]) or {}
+                metadata = clean_metadata(raw_meta)
+                markdown_body = parts[2]
+            except Exception as e:
+                metadata = {"error": f"YAML Parse Error: {str(e)}"}
+    
+    if 'type' not in metadata:
+        metadata['type'] = 'unknown'
+        
+    return {
+        "id": rel_path,
+        "metadata": metadata,
+        "content": markdown_body.strip(),
+        "raw": content
     }
 
-    body {
-      background: var(--bg);
-      color: var(--text);
-      font-family: var(--font);
-      height: 100vh;
-      display: flex;
-      flex-direction: column;
-      overflow: hidden;
-    }
+def extract_links(content):
+    links = re.findall(r'\[[^\]]+\]\(([^)]+)\)', content)
+    internal_links = []
+    for link in links:
+        if not link.startswith(('http://', 'https://', 'mailto:', '#')):
+            link_path = link.split('#')[0].split('?')[0]
+            if link_path:
+                internal_links.append(link_path)
+    return internal_links
 
-    /* ── Header ── */
-    header {
-      background: linear-gradient(135deg, #1a1040 0%, #0d1117 100%);
-      border-bottom: 1px solid var(--border);
-      padding: 14px 24px;
-      display: flex;
-      align-items: center;
-      gap: 14px;
-      flex-shrink: 0;
-    }
-    .logo {
-      width: 42px; height: 42px;
-      background: linear-gradient(135deg, var(--accent), var(--accent2));
-      border-radius: 12px;
-      display: flex; align-items: center; justify-content: center;
-      font-size: 20px;
-      box-shadow: 0 0 20px rgba(124,111,247,.35);
-    }
-    header h1 { font-size: 1.15rem; font-weight: 700; letter-spacing: -.3px; }
-    header p  { font-size: .75rem; color: var(--muted); margin-top: 1px; }
-    .badge {
-      margin-left: auto;
-      background: rgba(63,185,80,.15);
-      border: 1px solid rgba(63,185,80,.3);
-      color: var(--green);
-      font-size: .7rem;
-      font-weight: 600;
-      padding: 3px 10px;
-      border-radius: 999px;
-      display: flex; align-items: center; gap: 5px;
-    }
-    .dot {
-      width: 7px; height: 7px;
-      background: var(--green);
-      border-radius: 50%;
-      animation: pulse 1.8s ease-in-out infinite;
-    }
-    @keyframes pulse { 0%,100%{opacity:1;transform:scale(1)} 50%{opacity:.5;transform:scale(.85)} }
-
-    /* ── Chips (quick questions) ── */
-    .chips-bar {
-      background: var(--surface);
-      border-bottom: 1px solid var(--border);
-      padding: 10px 20px;
-      display: flex;
-      gap: 8px;
-      flex-wrap: wrap;
-      flex-shrink: 0;
-    }
-    .chip {
-      background: var(--surface2);
-      border: 1px solid var(--border);
-      color: var(--accent2);
-      font-size: .72rem;
-      font-weight: 500;
-      padding: 5px 12px;
-      border-radius: 999px;
-      cursor: pointer;
-      transition: all .18s;
-      white-space: nowrap;
-    }
-    .chip:hover { background: rgba(124,111,247,.15); border-color: var(--accent); color: var(--text); }
-
-    /* ── Messages ── */
-    #chat-window {
-      flex: 1;
-      overflow-y: auto;
-      padding: 24px 20px;
-      display: flex;
-      flex-direction: column;
-      gap: 18px;
-      scroll-behavior: smooth;
-    }
-    #chat-window::-webkit-scrollbar { width: 6px; }
-    #chat-window::-webkit-scrollbar-track { background: transparent; }
-    #chat-window::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
-
-    .msg-row {
-      display: flex;
-      gap: 10px;
-      max-width: 760px;
-      animation: slideIn .25s ease;
-    }
-    @keyframes slideIn { from{opacity:0;transform:translateY(8px)} to{opacity:1;transform:translateY(0)} }
-
-    .msg-row.user  { align-self: flex-end; flex-direction: row-reverse; }
-    .msg-row.bot   { align-self: flex-start; }
-
-    .avatar {
-      width: 34px; height: 34px; border-radius: 10px;
-      display: flex; align-items: center; justify-content: center;
-      font-size: 16px; flex-shrink: 0;
-    }
-    .avatar.bot  { background: linear-gradient(135deg, var(--accent), var(--accent2)); }
-    .avatar.user { background: linear-gradient(135deg, #1a3a5c, #2563eb); }
-
-    .bubble {
-      padding: 12px 16px;
-      border-radius: var(--radius);
-      font-size: .88rem;
-      line-height: 1.6;
-      max-width: 580px;
-    }
-    .msg-row.user  .bubble { background: var(--user-bg); border-bottom-right-radius: 4px; }
-    .msg-row.bot   .bubble { background: var(--bot-bg);  border-bottom-left-radius: 4px; border: 1px solid var(--border); }
-
-    /* confidence bar inside bubble */
-    .conf-row {
-      display: flex; align-items: center; gap: 8px;
-      margin-bottom: 8px;
-    }
-    .conf-label { font-size: .68rem; color: var(--muted); font-weight: 600; text-transform: uppercase; letter-spacing: .05em; }
-    .conf-bar-outer { flex: 1; height: 5px; background: var(--surface2); border-radius: 3px; overflow: hidden; }
-    .conf-bar-inner { height: 100%; border-radius: 3px; transition: width .6s ease; }
-    .conf-pct { font-size: .7rem; font-weight: 700; }
-
-    .suggestion {
-      margin-top: 10px;
-      padding: 8px 12px;
-      background: rgba(124,111,247,.08);
-      border: 1px solid rgba(124,111,247,.25);
-      border-radius: 8px;
-      font-size: .8rem;
-      color: var(--accent2);
-    }
-    .suggestion span { cursor: pointer; text-decoration: underline; text-underline-offset: 2px; }
-    .suggestion span:hover { color: var(--text); }
-
-    /* typing indicator */
-    .typing .bubble { padding: 14px 18px; }
-    .typing-dots { display: flex; gap: 4px; align-items: center; height: 14px; }
-    .typing-dots span {
-      width: 7px; height: 7px; border-radius: 50%;
-      background: var(--muted);
-      animation: bounce .9s ease-in-out infinite;
-    }
-    .typing-dots span:nth-child(2) { animation-delay: .15s; }
-    .typing-dots span:nth-child(3) { animation-delay: .3s; }
-    @keyframes bounce { 0%,100%{transform:translateY(0)} 50%{transform:translateY(-5px)} }
-
-    /* ── Topics list ── */
-    .topics-card {
-      background: var(--surface);
-      border: 1px solid var(--border);
-      border-radius: var(--radius);
-      padding: 14px 16px;
-      font-size: .82rem;
-    }
-    .topics-card h4 { margin-bottom: 8px; color: var(--accent2); font-size: .8rem; font-weight: 600; }
-    .topics-card ol { padding-left: 16px; line-height: 2; color: var(--muted); }
-    .topics-card li { cursor: pointer; transition: color .15s; }
-    .topics-card li:hover { color: var(--text); }
-
-    /* ── Input bar ── */
-    footer {
-      background: var(--surface);
-      border-top: 1px solid var(--border);
-      padding: 14px 20px;
-      display: flex;
-      gap: 10px;
-      align-items: flex-end;
-      flex-shrink: 0;
-    }
-    #user-input {
-      flex: 1;
-      background: var(--surface2);
-      border: 1px solid var(--border);
-      border-radius: 10px;
-      color: var(--text);
-      font-family: var(--font);
-      font-size: .9rem;
-      padding: 11px 14px;
-      resize: none;
-      outline: none;
-      transition: border-color .2s;
-      min-height: 44px;
-      max-height: 120px;
-      line-height: 1.5;
-    }
-    #user-input::placeholder { color: var(--muted); }
-    #user-input:focus { border-color: var(--accent); }
-
-    #send-btn {
-      background: linear-gradient(135deg, var(--accent), var(--accent2));
-      border: none;
-      border-radius: 10px;
-      color: #fff;
-      cursor: pointer;
-      font-size: .9rem;
-      font-weight: 600;
-      padding: 11px 20px;
-      transition: opacity .2s, transform .1s;
-      white-space: nowrap;
-    }
-    #send-btn:hover { opacity: .9; }
-    #send-btn:active { transform: scale(.97); }
-    #send-btn:disabled { opacity: .4; cursor: default; }
-
-    #help-btn {
-      background: var(--surface2);
-      border: 1px solid var(--border);
-      border-radius: 10px;
-      color: var(--muted);
-      cursor: pointer;
-      font-size: .85rem;
-      padding: 11px 14px;
-      transition: all .2s;
-    }
-    #help-btn:hover { border-color: var(--accent); color: var(--accent2); }
-  </style>
-</head>
-<body>
-
-<header>
-  <div class="logo">&#129302;</div>
-  <div>
-    <h1>Chart Bot</h1>
-    <p>Word Vector FAQ Explorer &mdash; powered by GloVe embeddings</p>
-  </div>
-  <div class="badge"><span class="dot"></span> Online</div>
-</header>
-
-<div class="chips-bar" id="chips">
-  <span class="chip" onclick="ask('What is cosine similarity?')">Cosine similarity</span>
-  <span class="chip" onclick="ask('What is word2vec?')">Word2Vec</span>
-  <span class="chip" onclick="ask('What is GloVe?')">GloVe</span>
-  <span class="chip" onclick="ask('Can embeddings be biased?')">Bias in embeddings</span>
-  <span class="chip" onclick="ask('What is the parallelogram model?')">Analogies</span>
-  <span class="chip" onclick="ask('Difference between sparse and dense vectors?')">Sparse vs Dense</span>
-  <span class="chip" onclick="ask('What is a co-occurrence matrix?')">Co-occurrence</span>
-  <span class="chip" onclick="ask('How does window size affect embeddings?')">Window size</span>
-</div>
-
-<div id="chat-window">
-  <div class="msg-row bot">
-    <div class="avatar bot">&#129302;</div>
-    <div class="bubble">
-      <strong>Hey! I'm Chart Bot.</strong><br>
-      Ask me anything about word embeddings, cosine similarity, Word2Vec, GloVe, analogies, bias, and more.<br><br>
-      I match your question by <em>meaning</em>, not exact words &mdash; so just type naturally!<br>
-      Click a chip above or type your own question below.
-    </div>
-  </div>
-</div>
-
-<footer>
-  <button id="help-btn" onclick="showTopics()">All topics</button>
-  <textarea id="user-input" rows="1" placeholder="Ask about word embeddings..." onkeydown="handleKey(event)"></textarea>
-  <button id="send-btn" onclick="sendMessage()">Send &#10148;</button>
-</footer>
-
-<script>
-const chatWindow = document.getElementById('chat-window');
-const input      = document.getElementById('user-input');
-const sendBtn    = document.getElementById('send-btn');
-
-// Auto-resize textarea
-input.addEventListener('input', () => {
-  input.style.height = 'auto';
-  input.style.height = Math.min(input.scrollHeight, 120) + 'px';
-});
-
-function handleKey(e) {
-  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(); }
-}
-
-function ask(text) { input.value = text; sendMessage(); }
-
-function scrollBottom() {
-  chatWindow.scrollTo({ top: chatWindow.scrollHeight, behavior: 'smooth' });
-}
-
-function appendUser(text) {
-  const row = document.createElement('div');
-  row.className = 'msg-row user';
-  row.innerHTML = `
-    <div class="avatar user">&#128100;</div>
-    <div class="bubble">${escHtml(text)}</div>`;
-  chatWindow.appendChild(row);
-  scrollBottom();
-}
-
-function showTyping() {
-  const row = document.createElement('div');
-  row.className = 'msg-row bot typing';
-  row.id = 'typing-row';
-  row.innerHTML = `
-    <div class="avatar bot">&#129302;</div>
-    <div class="bubble">
-      <div class="typing-dots"><span></span><span></span><span></span></div>
-    </div>`;
-  chatWindow.appendChild(row);
-  scrollBottom();
-  return row;
-}
-
-function removeTyping() {
-  const t = document.getElementById('typing-row');
-  if (t) t.remove();
-}
-
-function confColor(pct) {
-  if (pct >= 70) return '#3fb950';
-  if (pct >= 50) return '#d29922';
-  return '#f85149';
-}
-
-function appendBot(data) {
-  removeTyping();
-  const row = document.createElement('div');
-  row.className = 'msg-row bot';
-
-  const pct  = Math.round(data.score * 100);
-  const col  = confColor(pct);
-  const confidence = data.score > 0
-    ? `<div class="conf-row">
-         <span class="conf-label">Confidence</span>
-         <div class="conf-bar-outer">
-           <div class="conf-bar-inner" style="width:${pct}%;background:${col}"></div>
-         </div>
-         <span class="conf-pct" style="color:${col}">${pct}%</span>
-       </div>`
-    : '';
-
-  const suggestion = data.suggestion
-    ? `<div class="suggestion">
-         Did you mean: <span onclick="ask(${JSON.stringify(data.suggestion)})">&ldquo;${escHtml(data.suggestion)}&rdquo;</span>?
-       </div>`
-    : '';
-
-  row.innerHTML = `
-    <div class="avatar bot">&#129302;</div>
-    <div class="bubble">
-      ${confidence}
-      ${escHtml(data.answer)}
-      ${suggestion}
-    </div>`;
-  chatWindow.appendChild(row);
-  scrollBottom();
-}
-
-function appendHelp(topics) {
-  removeTyping();
-  const row = document.createElement('div');
-  row.className = 'msg-row bot';
-  const items = topics.map((t, i) =>
-    `<li onclick="ask(${JSON.stringify(t)})">${escHtml(t)}</li>`).join('');
-  row.innerHTML = `
-    <div class="avatar bot">&#129302;</div>
-    <div class="bubble">
-      <div class="topics-card">
-        <h4>All topics I know about (click to ask)</h4>
-        <ol>${items}</ol>
-      </div>
-    </div>`;
-  chatWindow.appendChild(row);
-  scrollBottom();
-}
-
-function escHtml(str) {
-  return str.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
-            .replace(/"/g,'&quot;').replace(/'/g,'&#39;');
-}
-
-async function sendMessage() {
-  const text = input.value.trim();
-  if (!text) return;
-  input.value = '';
-  input.style.height = 'auto';
-  sendBtn.disabled = true;
-
-  appendUser(text);
-  const typingRow = showTyping();
-
-  try {
-    const res = await fetch('/chat', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ message: text }),
-    });
-    const data = await res.json();
-
-    if (data.topics) {
-      appendHelp(data.topics);
-    } else {
-      appendBot(data);
-    }
-  } catch {
-    removeTyping();
-    const row = document.createElement('div');
-    row.className = 'msg-row bot';
-    row.innerHTML = `<div class="avatar bot">&#129302;</div>
-      <div class="bubble" style="color:#f85149">Connection error. Is the server running?</div>`;
-    chatWindow.appendChild(row);
-    scrollBottom();
-  }
-
-  sendBtn.disabled = false;
-  input.focus();
-}
-
-async function showTopics() {
-  appendUser('Show all topics');
-  showTyping();
-  const res  = await fetch('/topics');
-  const data = await res.json();
-  appendHelp(data.topics);
-}
-</script>
-</body>
-</html>
-"""
+# ── Flask API Routes ──────────────────────────────────────────────────────────
 
 @app.route("/")
 def index():
-    return render_template_string(HTML_PAGE)
+    if os.path.exists(os.path.join(app.static_folder, "index.html")):
+        return app.send_static_file('index.html')
+    else:
+        return """
+        <html>
+        <head>
+            <title>OKF & Embeddings Backend</title>
+            <style>
+                body {
+                    font-family: system-ui, -apple-system, sans-serif;
+                    background: #0b0f19;
+                    color: #e2e8f0;
+                    padding: 60px 20px;
+                    text-align: center;
+                }
+                .container {
+                    max-width: 600px;
+                    margin: 0 auto;
+                    background: #111827;
+                    border: 1px solid #1f2937;
+                    padding: 40px;
+                    border-radius: 16px;
+                    box-shadow: 0 10px 25px -5px rgba(0,0,0,0.3);
+                }
+                h1 { color: #8b5cf6; margin-bottom: 10px; font-weight: 800; }
+                p { color: #9ca3af; line-height: 1.6; }
+                code {
+                    background: #1f2937;
+                    padding: 4px 8px;
+                    border-radius: 6px;
+                    color: #a78bfa;
+                    font-family: monospace;
+                }
+                .badge {
+                    display: inline-block;
+                    background: rgba(16, 185, 129, 0.1);
+                    color: #10b981;
+                    border: 1px solid rgba(16, 185, 129, 0.2);
+                    padding: 4px 12px;
+                    border-radius: 9999px;
+                    font-size: 0.8rem;
+                    margin-bottom: 20px;
+                }
+            </style>
+        </head>
+        <body>
+            <div class="container">
+                <span class="badge">● Backend Online</span>
+                <h1>OKF & Embeddings Backend</h1>
+                <p>The Python Flask server is running successfully on port 5000.</p>
+                <p>Note: The React frontend static assets (<code>dist/</code>) have not been compiled yet.</p>
+                <p style="margin-top:20px; font-size:0.9rem;">
+                    Please run <code>npm run dev</code> to launch the interactive workspace, which starts both this backend and the Vite dev server with Hot-Module-Replacement.
+                </p>
+            </div>
+        </body>
+        </html>
+        """
+
+# ── OKF Document CRUD APIs ──
+
+@app.route('/api/documents', methods=['GET'])
+def api_list_documents():
+    files = get_okf_files(KNOWLEDGE_DIR)
+    docs = []
+    for f in files:
+        parsed = parse_okf_file(f)
+        if parsed:
+            docs.append({
+                "id": parsed["id"],
+                "type": parsed["metadata"].get("type", "unknown"),
+                "title": parsed["metadata"].get("title", parsed["id"]),
+                "description": parsed["metadata"].get("description", ""),
+                "tags": parsed["metadata"].get("tags", []),
+                "timestamp": parsed["metadata"].get("timestamp", "")
+            })
+    return jsonify(docs)
+
+@app.route('/api/documents/<path:filename>', methods=['GET'])
+def api_get_document(filename):
+    parsed = parse_okf_file(filename)
+    if parsed is None:
+        return jsonify({"error": "Document not found"}), 404
+    return jsonify(parsed)
+
+@app.route('/api/documents', methods=['POST'])
+def api_create_document():
+    data = request.json
+    filename = data.get("id")
+    if not filename:
+        return jsonify({"error": "Filename ID is required"}), 400
+    if not filename.endswith('.md'):
+        filename += '.md'
+        
+    abs_path = os.path.join(KNOWLEDGE_DIR, filename.replace('/', os.sep))
+    os.makedirs(os.path.dirname(abs_path), exist_ok=True)
+    
+    metadata = data.get("metadata", {})
+    content = data.get("content", "")
+    
+    yaml_str = yaml.dump(metadata, default_flow_style=False)
+    file_content = f"---\n{yaml_str}---\n\n{content}"
+    
+    try:
+        with open(abs_path, 'w', encoding='utf-8') as f:
+            f.write(file_content)
+        return jsonify({"success": True, "id": filename})
+    except Exception as e:
+        return jsonify({"error": f"Failed to save document: {str(e)}"}), 500
+
+@app.route('/api/documents/<path:filename>', methods=['PUT'])
+def api_update_document(filename):
+    data = request.json
+    abs_path = os.path.join(KNOWLEDGE_DIR, filename.replace('/', os.sep))
+    if not os.path.exists(abs_path):
+        return jsonify({"error": "Document not found"}), 404
+        
+    metadata = data.get("metadata", {})
+    content = data.get("content", "")
+    
+    yaml_str = yaml.dump(metadata, default_flow_style=False)
+    file_content = f"---\n{yaml_str}---\n\n{content}"
+    
+    try:
+        with open(abs_path, 'w', encoding='utf-8') as f:
+            f.write(file_content)
+        return jsonify({"success": True})
+    except Exception as e:
+        return jsonify({"error": f"Failed to update document: {str(e)}"}), 500
+
+@app.route('/api/documents/<path:filename>', methods=['DELETE'])
+def api_delete_document(filename):
+    abs_path = os.path.join(KNOWLEDGE_DIR, filename.replace('/', os.sep))
+    if not os.path.exists(abs_path):
+        return jsonify({"error": "Document not found"}), 404
+    try:
+        os.remove(abs_path)
+        return jsonify({"success": True})
+    except Exception as e:
+        return jsonify({"error": f"Failed to delete document: {str(e)}"}), 500
+
+# ── OKF Bundle Validation API ──
+
+@app.route('/api/validate', methods=['GET'])
+def api_validate():
+    files = get_okf_files(KNOWLEDGE_DIR)
+    errors = []
+    warnings = []
+    stats = {
+        "total_files": len(files),
+        "by_type": {},
+        "broken_links_count": 0
+    }
+    
+    for f in files:
+        parsed = parse_okf_file(f)
+        if not parsed:
+            errors.append({"file": f, "message": "Failed to read or parse file"})
+            continue
+            
+        doc_type = parsed["metadata"].get("type", "unknown")
+        stats["by_type"][doc_type] = stats["by_type"].get(doc_type, 0) + 1
+        
+        # Check type field presence
+        if "type" not in parsed["metadata"] or parsed["metadata"].get("type") == "unknown":
+            errors.append({"file": f, "message": "Missing 'type' field in YAML frontmatter"})
+            
+        # Validate links
+        links = extract_links(parsed["content"])
+        doc_dir = os.path.dirname(f)
+        for link in links:
+            resolved_rel = os.path.normpath(os.path.join(doc_dir, link)).replace('\\', '/')
+            target_abs = os.path.join(KNOWLEDGE_DIR, resolved_rel.replace('/', os.sep))
+            if not os.path.exists(target_abs):
+                errors.append({
+                    "file": f,
+                    "message": f"Broken relative link: '{link}' (resolves to '{resolved_rel}')"
+                })
+                stats["broken_links_count"] += 1
+                
+    score = max(0, 100 - (len(errors) * 15 + len(warnings) * 5))
+    
+    return jsonify({
+        "valid": len(errors) == 0,
+        "score": score,
+        "errors": errors,
+        "warnings": warnings,
+        "stats": stats
+    })
+
+# ── Graph Building API ──
+
+@app.route('/api/graph', methods=['GET'])
+def api_graph():
+    files = get_okf_files(KNOWLEDGE_DIR)
+    nodes = []
+    edges = []
+    
+    for f in files:
+        parsed = parse_okf_file(f)
+        if parsed:
+            nodes.append({
+                "id": f,
+                "label": parsed["metadata"].get("title", f),
+                "type": parsed["metadata"].get("type", "unknown"),
+                "description": parsed["metadata"].get("description", "")
+            })
+            
+    for f in files:
+        parsed = parse_okf_file(f)
+        if parsed:
+            links = extract_links(parsed["content"])
+            doc_dir = os.path.dirname(f)
+            for link in links:
+                resolved_rel = os.path.normpath(os.path.join(doc_dir, link)).replace('\\', '/')
+                edges.append({
+                    "from": f,
+                    "to": resolved_rel,
+                    "broken": not os.path.exists(os.path.join(KNOWLEDGE_DIR, resolved_rel.replace('/', os.sep)))
+                })
+                
+    return jsonify({
+        "nodes": nodes,
+        "edges": edges
+    })
+
+# ── Agent Simulation API ──
+
+@app.route('/api/agent-simulation', methods=['GET'])
+def api_agent_simulation():
+    query_text = request.args.get("query", "").lower()
+    
+    path = ["index.md"]
+    reasoning = [
+        "Agent starts at the root `index.md` to scan the entry point metadata and directory listings."
+    ]
+    
+    if not query_text:
+        return jsonify({"path": path, "reasoning": reasoning})
+        
+    if any(k in query_text for k in ["outage", "stripe", "adyen", "down", "fail", "error", "triage", "payment"]):
+        path.append("concepts/payment-gateway.md")
+        reasoning.append(
+            "Query mentions payments, Stripe, or operational issues. Agent inspects 'concepts/payment-gateway.md' to understand the integration architecture."
+        )
+        path.append("playbooks/payment-outage.md")
+        reasoning.append(
+            "The concept documentation links to 'playbooks/payment-outage.md' for troubleshooting. Agent follows the link and retrieves recovery steps (e.g. updating env variable PROCESSOR_PRIMARY)."
+        )
+    elif any(k in query_text for k in ["checkout", "purchase", "order", "cart"]):
+        path.append("concepts/checkout-service.md")
+        reasoning.append(
+            "Query relates to transactions/ordering. Agent navigates to 'concepts/checkout-service.md' which manages the checkout flow."
+        )
+        path.append("schemas/user-profile.md")
+        reasoning.append(
+            "Checkout depends on customer profile details. Agent traverses to 'schemas/user-profile.md' to verify the schema payload."
+        )
+    elif any(k in query_text for k in ["user", "profile", "schema", "database", "field"]):
+        path.append("schemas/user-profile.md")
+        reasoning.append(
+            "Query relates to customer registration or schema details. Agent follows link directly to 'schemas/user-profile.md' and reads database properties."
+        )
+    else:
+        # Generic scanner
+        files = get_okf_files(KNOWLEDGE_DIR)
+        best_match = None
+        best_score = 0
+        for f in files:
+            if f == "index.md":
+                continue
+            parsed = parse_okf_file(f)
+            if parsed:
+                title = parsed["metadata"].get("title", "").lower()
+                desc = parsed["metadata"].get("description", "").lower()
+                tags = [t.lower() for t in parsed["metadata"].get("tags", [])]
+                
+                score = 0
+                for word in query_text.split():
+                    if len(word) > 2:
+                        if word in title: score += 5
+                        if word in desc: score += 2
+                        if word in tags: score += 3
+                        
+                if score > best_score:
+                    best_score = score
+                    best_match = f
+                    
+        if best_match:
+            path.append(best_match)
+            reasoning.append(
+                f"Agent scanned document metadata and matched queries against tags. Navigating directly to '{best_match}' (matching score: {best_score})."
+            )
+        else:
+            reasoning.append(
+                "Agent scanned all metadata fields in the OKF bundle but did not locate high-confidence tags. Terminating crawl."
+            )
+            
+    return jsonify({
+        "path": path,
+        "reasoning": reasoning
+    })
+
+# ── Word Embeddings APIs (Existing word similarity and analogy functionalities) ──
+
+@app.route("/api/embeddings/similarity", methods=["POST"])
+def api_similarity():
+    data = request.get_json(force=True)
+    word = data.get("word", "").strip().lower()
+    if not word:
+        return jsonify({"error": "Word is required"}), 400
+    if word not in model:
+        return jsonify({"error": f"'{word}' is not in the GloVe vocabulary"}), 404
+        
+    neighbors = []
+    for neighbor, score in model.most_similar(word, topn=10):
+        neighbors.append({"word": neighbor, "similarity": round(float(score), 3)})
+    return jsonify({"word": word, "neighbors": neighbors})
+
+@app.route("/api/embeddings/analogy", methods=["POST"])
+def api_analogy():
+    data = request.get_json(force=True)
+    a = data.get("a", "").strip().lower() # man
+    b = data.get("b", "").strip().lower() # king
+    c = data.get("c", "").strip().lower() # woman
+    if not (a and b and c):
+        return jsonify({"error": "Words a, b, and c are required for the analogy a:b :: c:?"}), 400
+        
+    missing = [w for w in [a, b, c] if w not in model]
+    if missing:
+        return jsonify({"error": f"Words not in vocabulary: {', '.join(missing)}"}), 404
+        
+    # Analogy formula: king - man + woman (b - a + c)
+    try:
+        results = model.most_similar(positive=[b, c], negative=[a], topn=5)
+        analogies = [{"word": word, "similarity": round(float(score), 3)} for word, score in results]
+        return jsonify({"a": a, "b": b, "c": c, "results": analogies})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 @app.route("/chat", methods=["POST"])
 def chat():
+    # Retain the original Chat Bot route for backwards compatibility / Streamlit integration
     data = request.get_json(force=True)
     user_input = (data.get("message") or "").strip()
 
     if not user_input:
         return jsonify({"answer": "Please type a question.", "score": 0})
 
-    # Help command
     if user_input.lower() in ("help", "topics", "all topics", "show all topics"):
         return jsonify({"topics": [q for q, _ in FAQS]})
 
@@ -567,8 +543,7 @@ def chat():
 
     if not results:
         return jsonify({
-            "answer": "I don't recognise any of those words. Try asking about "
-                      "word embeddings, cosine similarity, Word2Vec, or GloVe.",
+            "answer": "I don't recognise any of those words. Try asking about word embeddings, cosine similarity, Word2Vec, or GloVe.",
             "score": 0,
         })
 
@@ -576,12 +551,10 @@ def chat():
 
     if best_score < LOW_CONFIDENCE:
         return jsonify({
-            "answer": f"I'm not confident about that (best match {best_score:.0%}). "
-                      "Try rephrasing, or click 'All topics' to see what I know.",
+            "answer": f"I'm not confident about that (best match {best_score:.0%}). Try rephrasing, or ask about general concepts.",
             "score": round(best_score, 3),
         })
 
-    # Suggest alternative if borderline
     suggestion = None
     if best_score < HIGH_CONFIDENCE and len(results) > 1:
         alt_score, alt_q, _ = results[1]
@@ -599,8 +572,7 @@ def chat():
 def topics():
     return jsonify({"topics": [q for q, _ in FAQS]})
 
-
 if __name__ == "__main__":
-    print("\n  Chart Bot Web UI")
-    print("  Open http://localhost:5000 in your browser\n")
+    print("\n  OKF & Word Similarity Explorer Backend running.")
+    print("  Host: http://localhost:5000\n")
     app.run(host="0.0.0.0", port=5000, debug=False)

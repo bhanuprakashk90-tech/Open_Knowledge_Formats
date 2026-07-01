@@ -1,156 +1,111 @@
-# Word Similarity & Analogy Explorer
+# Open Knowledge Format (OKF) & Word Embeddings Explorer
 
-A beginner-friendly project that walks through the **Vector Semantics &
-Embeddings** lecture slides, stage by stage. You'll go from counting
-words by hand to using real pretrained embeddings, solving analogies,
-and finally running an interactive FAQ chatbot with a web UI.
+Welcome to the **Open Knowledge Format (OKF) & Word Embeddings Explorer**! This project is an interactive, developer-friendly playground that demonstrates the Google-introduced **Open Knowledge Format (Version 0.1)** and compares it directly with traditional **Retrieval-Augmented Generation (RAG)**. 
 
-No deep ML background needed — just run the scripts in order and read
-the comments. Each one prints out what's happening and ties it back to
-a specific slide.
+It also retains the original word vector exploration suite, allowing you to learn vector semantics, cosine similarity, analogies (using GloVe pre-trained embeddings), and a semantic FAQ chatbot.
 
-## What you'll build
+---
 
-| Stage | File | What it does | Concept |
-|---|---|---|---|
-| 1 | `stage1_cooccurrence.py` | Counts how often words appear near each other in a tiny made-up corpus | Word-context matrix (pg 35-44) |
-| 2 | `stage2_cosine_similarity.py` | Implements cosine similarity **from scratch** (just math, no libraries) | Cosine similarity (pg 46-53) |
-| 3 | `stage3_load_embeddings.py` | Downloads and loads real pretrained GloVe word vectors | Dense embeddings / word2vec (pg 54-58) |
-| 4 | `stage4_analogy_solver.py` | Solves analogies using vector arithmetic | Parallelogram model (pg 86-89) |
-| 5 (bonus) | `stage5_interactive.py` | A simple menu to type in **your own** words and analogies, no code editing needed | Ties Stages 3-4 together interactively |
-| 6 (bonus) | `chatbot.py` + `faq_data.py` | An FAQ chatbot that matches your question to the closest known question **by meaning**, not exact wording | IDF-weighted sentence vectors + cosine similarity |
-| 7 (bonus) | `streamlit_app.py` | Full **web UI** for the chatbot — dark theme, confidence bars, topic sidebar, live threshold slider | Streamlit |
-| — | `web_app.py` | Alternative Flask REST API + HTML chat UI | Flask |
+## ⚡ What is Open Knowledge Format (OKF)?
 
-## Setup
+Introduced by Google Cloud in June 2026, the **Open Knowledge Format (OKF)** is a vendor-neutral specification for representing organizational knowledge. It solves the context-fragmentation problem in LLM-based applications by formalizing the "LLM-wiki" pattern.
 
-1. Make sure you have Python 3.8+ installed.
-2. Open a terminal in this folder.
-3. (Recommended) create a virtual environment:
-   ```
-   python -m venv venv
-   venv\Scripts\activate      # Windows
-   source venv/bin/activate   # macOS / Linux
-   ```
-4. Install all dependencies:
-   ```
-   pip install -r requirements.txt
-   ```
-   (Stages 1-2 use only Python's standard library — nothing to install.)
+### Key Characteristics of OKF:
+1. **Plain Text Directories**: An OKF bundle is simply a nested folder structure of standard Markdown (`.md`) files. No proprietary runtimes, databases, or compression formats are required.
+2. **YAML Frontmatter**: Every document starts with a metadata block delimited by `---` containing queryable fields. The only required field is `type`.
+3. **Structured Interlinking**: Documents reference other concepts, schemas, or playbooks using relative Markdown links (e.g. `[See also](../concepts/billing.md)`), forming a navigable, semantic wiki graph.
+4. **Agent-Friendly**: AI agents can crawl this graph natively (following links), maintaining hierarchical context, layout, and instructions without losing connection structure.
 
-## How to run it
+---
 
-Run the stages **in order** — each one builds on the idea before it.
+## ⚖️ OKF vs. Traditional RAG: Why OKF is Better
 
-### Stage 1 — Count co-occurrences by hand
+| Metric | Traditional RAG | Open Knowledge Format (OKF) |
+| :--- | :--- | :--- |
+| **Mechanics** | Splits text into arbitrary chunks, indexes them in a Vector DB, and pulls fragments via similarity search. | AI agent starts at the root `index.md` and crawls related documents via structured links. |
+| **Context Retention** | **Poor.** Chunking shreds tables, splits playbooks, and detaches commands from safety labels. | **Perfect.** Documents are loaded intact, preserving headers, formatting, and relational dependencies. |
+| **Hallucination Rate** | **High.** Fragmented context forces LLMs to guess parameters, often outputting incorrect commands. | **Low.** Deterministic graph walks provide complete context, ensuring factual correctness. |
+| **Auditability** | **Black-Box.** Difficult to analyze why specific chunks were matching the vector query space. | **High.** The agent's path walk is deterministic, fully traceable, and logged step-by-step. |
+| **Compute Cost** | **Expensive.** Requires model inferences for embeddings, vector DB storage, and vector distance mathematics. | **Zero-Compute.** Files are stored as standard Git-versioned markdown; lookup uses simple graph links. |
+
+---
+
+## 🛠️ Web UI Features
+
+Our interactive Web UI coordinates all parts of the application:
+1. **Interactive Dashboard**: Provides OKF bundle health metrics, document statistics, keyword tag distributions, and validation scores.
+2. **Knowledge Graph**: A canvas-based force-directed graph illustrating documents as colored nodes and Markdown links as directed arrows. Detects broken references (in dashed red) and highlights simulated agent paths.
+3. **Document Editor**: A dual-pane Markdown editor with real-time YAML frontmatter validation and live preview. Clicking relative Markdown links in the preview dynamically loads that target file into the editor.
+4. **RAG vs. OKF Sandbox**: Illustrates the retrieval path of both paradigms side-by-side. Simulates chunk extraction issues in RAG vs. precise link-walks in OKF.
+5. **Agent Navigation Simulator**: Simulates an LLM agent crawling from `index.md` to specific target files, showcasing its reasoning trace at each step.
+6. **GloVe Embeddings Playground**: Connects to the pre-trained GloVe vector space (`glove-wiki-gigaword-50`) to find nearest neighbors, solve custom analogies (`a is to b as c is to ?`), and chat with the semantic FAQ bot.
+
+---
+
+## 🚀 Setup & Installation
+
+Ensure you have **Python 3.8+** and **Node.js 18+** installed.
+
+### 1. Python Environment Setup
+Activate a virtual environment and install dependencies:
+```bash
+python -m venv venv
+venv\Scripts\activate      # On Windows
+source venv/bin/activate   # On macOS / Linux
+
+pip install -r requirements.txt
 ```
-python stage1_cooccurrence.py
-```
-Builds a tiny "word-context matrix" from a handful of made-up sentences.
-You'll see that `cherry` and `strawberry` share contexts like `pie` and
-`sugar`, while `digital` and `information` share `computer` and `data` —
-**words with similar neighbors have similar meaning.**
+*(PyYAML, Flask, Flask-Cors, and Gensim are required. They will download automatically if not already installed).*
 
-### Stage 2 — Cosine similarity from scratch
-```
-python stage2_cosine_similarity.py
-```
-Reproduces the exact worked example from the slides (cherry vs. digital vs.
-information) and shows why raw dot products are misleading and why dividing
-by vector length (cosine) fixes it. Then reuses Stage 1's data.
-
-### Stage 3 — Real pretrained embeddings
-```
-python stage3_load_embeddings.py
-```
-Downloads a small GloVe model (~66 MB, one-time) trained on Wikipedia and
-shows the nearest neighbors of words like `sweet`, `king`, and `computer`.
-
-> First run needs an internet connection. After that it's cached locally.
-
-### Stage 4 — Solve analogies
-```
-python stage4_analogy_solver.py
-```
-Using simple vector arithmetic (`king - man + woman`), finds the closest
-real word — `queen`. Also tries `Paris - France + Italy` → `Rome`.
-
-### Stage 5 (bonus) — Interactive terminal explorer
-```
-python stage5_interactive.py
-```
-A simple command-line menu to find similar words and solve your own analogies
-without editing any code.
-
-```
-1) Find words similar to a word
-2) Solve an analogy (a is to b as a* is to ?)
-3) Quit
+### 2. Node.js Environment Setup
+In the root directory, install npm packages:
+```bash
+npm install
 ```
 
-### Stage 6 (bonus) — Chart Bot (terminal FAQ chatbot)
+---
+
+## 🏃 How to Run the Application
+
+### Development Mode (Recommended)
+To run both the Python Flask backend and the Vite-React frontend dev server concurrently:
+```bash
+npm run dev
 ```
-python chatbot.py
-```
-A chatbot that answers questions about word embeddings by **meaning**, not
-keyword matching.
+Then open **http://localhost:5173** in your browser. This includes Hot-Module-Replacement for frontend changes.
 
-**How it works:**
-- Each FAQ question (`faq_data.py`) gets an IDF-weighted sentence vector
-  (average of its GloVe word vectors, with rare/content words weighted higher).
-- Your question gets the same treatment, then cosine similarity finds the
-  closest FAQ.
-- Result: typing *"whats a synonym mean"* still matches *"What does it mean
-  for two words to be synonyms?"* — even with different wording.
+### Production Mode (Single Server)
+If you want to compile the frontend and run the entire application from the Flask Python server:
+```bash
+# 1. Compile the React build
+npm run build
 
-Features:
-- **IDF weighting** — stop-words like "what", "is", "a" don't dominate
-- **Top-3 candidates** — finds best match plus a "did you mean?" fallback
-- **Confidence bar** — shows how sure the bot is (`█████ 92%`)
-- **24 FAQ topics** covering all key concepts in the lecture slides
-- Type `help` to list all topics
-
-### Stage 7 (bonus) — Streamlit Web UI
-```
-streamlit run streamlit_app.py
-```
-Then open **http://localhost:8501** in your browser.
-
-A full web chat interface built with Streamlit:
-
-| Feature | Details |
-|---|---|
-| Dark chat UI | GitHub-dark theme, animated message bubbles |
-| Quick-chips | 8 one-click question buttons at the top |
-| Confidence bar | Colour-coded: green ≥70% · yellow ≥50% · red <50% |
-| "Did you mean?" | Suggests a closer FAQ if match is borderline |
-| Topic sidebar | Every FAQ listed as a clickable button |
-| Confidence slider | Tune the answer threshold live (0.30–0.80) |
-| Clear chat | Reset conversation in one click |
-
-### Alternative — Flask web app
-```
+# 2. Start the Flask server
 python web_app.py
 ```
-Then open **http://localhost:5000**. A lightweight Flask REST API + HTML
-chat page — no framework install needed beyond Flask.
+Then open **http://localhost:5000** in your browser. Flask serves the static compiled frontend assets from `dist/` and runs all API endpoints on port 5000.
 
-## Things to try next (optional extensions)
+---
 
-- **Bigger toy corpus**: add sentences to `CORPUS` in `stage1_cooccurrence.py`
-- **Different window sizes**: change `WINDOW_SIZE` in Stage 1 (pg 85)
-- **Your own analogies**: edit Stage 4 to test custom analogies
-- **Bias exploration**: try analogies like `man:programmer :: woman:?` (pg 91)
-- **Bigger GloVe model**: change `MODEL_NAME` to `"glove-wiki-gigaword-300"`
-- **Extend the chatbot**: add more `(question, answer)` pairs to `faq_data.py`
+## 📂 OKF Schema Reference
 
-## Why this matters (the short version)
+For the sample bundle located under `knowledge/`, here is the standard schema convention:
 
-- **Stage 1-2** show the *original* idea: meaning = "what words show up nearby"
-  (Firth/Harris distributional hypothesis, pg 22), measured with counting + cosine.
-- **Stage 3-4** show the *modern* version: dense word2vec/GloVe vectors that
-  capture gender, country↔capital, and many other relations.
-- **Stage 6-7** show a *real-world application*: semantic search / FAQ matching,
-  the same technique used in production search engines and chatbots.
+```yaml
+---
+type: concept | playbook | schema | index  # REQUIRED
+title: Display Name                         # OPTIONAL
+description: Brief one-line summary         # OPTIONAL
+resource: service-uri://path                # OPTIONAL (e.g. database schema key, pod uri)
+tags:                                       # OPTIONAL
+  - tag-name
+  - category
+timestamp: 2026-07-01T02:00:00Z             # OPTIONAL (ISO 8601 format)
+---
+```
 
-That's the whole story of the lecture in one runnable project.
+### Example Folder Structure:
+- `knowledge/index.md` (Bundle entry point)
+- `knowledge/concepts/` (System overviews, service documentation)
+- `knowledge/playbooks/` (SRE troubleshooting guides, runbooks)
+- `knowledge/schemas/` (Database schemas, API model definitions)
