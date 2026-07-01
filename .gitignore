@@ -1,0 +1,7 @@
+venv/
+__pycache__/
+*.pyc
+node_modules/
+dist/
+Open_Knowledge_Formats/
+package-lock.json
