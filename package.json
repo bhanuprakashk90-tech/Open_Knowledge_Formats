@@ -2,10 +2,10 @@
   "name": "open-knowledge-formats",
   "version": "1.0.0",
   "description": "Interactive Web UI and comparative RAG playground for Open Knowledge Formats",
-  "main": "server.js",
+  "main": "web_app.py",
   "type": "module",
   "scripts": {
-    "server": "node server.js",
+    "server": "python web_app.py",
     "client": "vite",
     "build": "vite build",
     "preview": "vite preview",
